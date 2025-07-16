@@ -114,16 +114,16 @@ rules:
     verbs:
       - get
   - apiGroups:
-    - cert-manager.io
+      - cert-manager.io
     resources:
-    - certificates
-    - issuers
+      - certificates
+      - issuers
     verbs:
-    - create
-    - get
-    - list
-    - patch
-    - update
+      - create
+      - get
+      - list
+      - patch
+      - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

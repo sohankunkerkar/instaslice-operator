@@ -1,0 +1,55 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+  name: scheduler-privileges
+rules:
+# Standard scheduler permissions for pod binding
+- apiGroups: [""]
+  resources: ["pods/binding", "pods/status"]
+  verbs: ["create", "update", "patch"]
+- apiGroups: [""]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list", "watch"]
+# Event creation
+- apiGroups: ["", "events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create"]
+# Storage-related permissions
+- apiGroups: ["storage.k8s.io"]
+  resources: ["csinodes", "csidrivers", "csistoragecapacities", "storageclasses", "volumeattachments"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["persistentvolumes", "persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]
+# Additional standard scheduler permissions
+- apiGroups: [""]
+  resources: ["replicationcontrollers", "services", "namespaces"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps", "extensions"]
+  resources: ["replicasets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["statefulsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["policy"]
+  resources: ["poddisruptionbudgets"]
+  verbs: ["get", "list", "watch"]
+# DAS-specific permissions
+- apiGroups: ["inference.redhat.com"]
+  resources: ["nodeaccelerators", "nodeaccelerators/status", "dasoperators", "dasoperators/status", "allocationclaims", "allocationclaims/status", "allocationclaims/finalizers"]
+  verbs: ["get", "list", "watch", "update", "patch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: das-scheduler-privileges
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scheduler-privileges
+subjects:
+- kind: ServiceAccount
+  name: das-scheduler
+  namespace: das-operator
