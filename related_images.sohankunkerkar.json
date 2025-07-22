@@ -1,0 +1,22 @@
+[
+  {
+    "name": "instaslice-scheduler-next",
+    "image": "quay.io/sohankunkerkar/instaslice-scheduler:latest"
+  },
+  {
+    "name": "instaslice-daemonset-next",
+    "image": "quay.io/sohankunkerkar/instaslice-daemonset:latest"
+  },
+  {
+    "name": "instaslice-webhook-next",
+    "image": "quay.io/sohankunkerkar/instaslice-webhook:latest"
+  },
+  {
+    "name": "instaslice-operator-next",
+    "image": "quay.io/sohankunkerkar/instaslice-operator:latest"
+  },
+  {
+    "name": "instaslice-operator-bundle-next",
+    "image": "quay.io/sohankunkerkar/instaslice-operator-bundle:latest"
+  }
+] 
