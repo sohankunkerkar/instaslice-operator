@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+	kubeschedulerframework "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -30,7 +31,12 @@ import (
 	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 )
 
-const Name = "MigAccelerator"
+const (
+	Name = "MigAccelerator"
+	// NoSlotAvailable is a sentinel value indicating no placement slot was found on the GPU.
+	// This value is outside the valid range of GPU slot indices (0-7).
+	NoSlotAvailable = int32(9)
+)
 
 // Plugin implements a scheduler Filter extension for GPU allocation.
 type Plugin struct {
@@ -233,34 +239,34 @@ func New(ctx context.Context, args runtime.Object, handle framework.Handle) (fra
 }
 
 // Filter checks if the given node has an available MIG slice for the pod.
-func (p *Plugin) Filter(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
+func (p *Plugin) Filter(ctx context.Context, state kubeschedulerframework.CycleState, pod *corev1.Pod, nodeInfo kubeschedulerframework.NodeInfo) *kubeschedulerframework.Status {
 	node := nodeInfo.Node()
 	if node == nil {
-		return framework.NewStatus(framework.Error, "node not found")
+		return kubeschedulerframework.NewStatus(kubeschedulerframework.Error, "node not found")
 	}
 	if val, ok := node.Labels["nvidia.com/mig.capable"]; !ok || val != "true" {
-		return framework.NewStatus(framework.Unschedulable, "node not MIG capable")
+		return kubeschedulerframework.NewStatus(kubeschedulerframework.Unschedulable, "node not MIG capable")
 	}
 	klog.InfoS("checking MIG availability", "pod", klog.KObj(pod), "node", node.Name)
 
 	instObj, err := p.instasliceLister.NodeAccelerators(p.namespace).Get(node.Name)
 	if err != nil {
-		return framework.NewStatus(framework.Unschedulable, err.Error())
+		return kubeschedulerframework.NewStatus(kubeschedulerframework.Unschedulable, err.Error())
 	}
 	if instObj.Spec.AcceleratorType != "" && instObj.Spec.AcceleratorType != "nvidia-mig" {
-		return framework.NewStatus(framework.Unschedulable, fmt.Sprintf("unsupported acceleratorType %s", instObj.Spec.AcceleratorType))
+		return kubeschedulerframework.NewStatus(kubeschedulerframework.Unschedulable, fmt.Sprintf("unsupported acceleratorType %s", instObj.Spec.AcceleratorType))
 	}
 	var resources instav1alpha1.DiscoveredNodeResources
 	if len(instObj.Status.NodeResources.Raw) > 0 {
 		if err := json.Unmarshal(instObj.Status.NodeResources.Raw, &resources); err != nil {
-			return framework.AsStatus(err)
+			return kubeschedulerframework.AsStatus(err)
 		}
 	}
 
 	// remove any existing claims for this pod on this node
 	items, err := p.allocationIndexer.ByIndex("pod-uid", string(pod.UID))
 	if err != nil {
-		return framework.AsStatus(err)
+		return kubeschedulerframework.AsStatus(err)
 	}
 	for _, obj := range items {
 		ac, ok := obj.(*instav1alpha1.AllocationClaim)
@@ -278,7 +284,7 @@ func (p *Plugin) Filter(ctx context.Context, state *framework.CycleState, pod *c
 		klog.InfoS("removing stale AllocationClaim for pod", "pod", klog.KObj(pod), "claim", klog.KObj(ac))
 		if err := p.instaClient.OpenShiftOperatorV1alpha1().AllocationClaims(ac.Namespace).Delete(ctx, ac.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			klog.ErrorS(err, "failed to delete existing AllocationClaim", "AllocationClaim", klog.KObj(ac))
-			return framework.AsStatus(err)
+			return kubeschedulerframework.AsStatus(err)
 		}
 		p.indexerDelete(ac)
 	}
@@ -303,7 +309,7 @@ func (p *Plugin) Filter(ctx context.Context, state *framework.CycleState, pod *c
 	for _, gpu := range resources.NodeGPUs {
 		allocs, err := p.listGPUAllocations(node.Name, gpu.GPUUUID)
 		if err != nil {
-			return framework.AsStatus(err)
+			return kubeschedulerframework.AsStatus(err)
 		}
 		skip := false
 		for _, a := range allocs {
@@ -334,7 +340,7 @@ func (p *Plugin) Filter(ctx context.Context, state *framework.CycleState, pod *c
 			}
 			idx := gpuAllocated[gpu.GPUUUID]
 			newStart := getStartIndexFromAllocationResults(resources, profileName, idx)
-			if newStart == int32(9) {
+			if newStart == NoSlotAvailable {
 				continue
 			}
 			size, _, _, _ := extractGpuProfile(resources, profileName)
@@ -372,7 +378,7 @@ func (p *Plugin) Filter(ctx context.Context, state *framework.CycleState, pod *c
 						Get(ctx, alloc.Name, metav1.GetOptions{})
 					if err != nil {
 						klog.ErrorS(err, "failed to get AllocationClaim", "AllocationClaim", klog.KObj(alloc))
-						return framework.AsStatus(err)
+						return kubeschedulerframework.AsStatus(err)
 					}
 				} else {
 					// clean up other claims
@@ -391,12 +397,12 @@ func (p *Plugin) Filter(ctx context.Context, state *framework.CycleState, pod *c
 							Delete(ctx, ac.Name, metav1.DeleteOptions{})
 						if err != nil && !apierrors.IsNotFound(err) {
 							klog.ErrorS(err, "failed to delete other AllocationClaim", "AllocationClaim", klog.KObj(ac))
-							return framework.AsStatus(err)
+							return kubeschedulerframework.AsStatus(err)
 						}
 						p.indexerDelete(ac)
 					}
 					klog.ErrorS(err, "failed to delete created AllocationClaim", "AllocationClaim", klog.KObj(created))
-					return framework.AsStatus(err)
+					return kubeschedulerframework.AsStatus(err)
 				}
 			}
 
@@ -422,7 +428,7 @@ func (p *Plugin) Filter(ctx context.Context, state *framework.CycleState, pod *c
 						Delete(ctx, ac.Name, metav1.DeleteOptions{})
 					if err != nil && !apierrors.IsNotFound(err) {
 						klog.ErrorS(err, "failed to delete staged AllocationClaim", "AllocationClaim", klog.KObj(ac))
-						return framework.AsStatus(err)
+						return kubeschedulerframework.AsStatus(err)
 					}
 					p.indexerDelete(ac)
 				}
@@ -436,11 +442,11 @@ func (p *Plugin) Filter(ctx context.Context, state *framework.CycleState, pod *c
 					if err2 != nil && !apierrors.IsNotFound(err2) {
 						klog.ErrorS(err2, "failed to delete created AllocationClaim",
 							"AllocationClaim", klog.KObj(created))
-						return framework.AsStatus(err2)
+						return kubeschedulerframework.AsStatus(err2)
 					}
 					p.indexerDelete(created)
 				}
-				return framework.AsStatus(err)
+				return kubeschedulerframework.AsStatus(err)
 			}
 
 			p.indexerAdd(updated)
@@ -468,11 +474,11 @@ func (p *Plugin) Filter(ctx context.Context, state *framework.CycleState, pod *c
 				err = p.instaClient.OpenShiftOperatorV1alpha1().AllocationClaims(ac.Namespace).Delete(ctx, ac.Name, metav1.DeleteOptions{})
 				if err != nil && !apierrors.IsNotFound(err) {
 					klog.ErrorS(err, "failed to delete staged AllocationClaim", "AllocationClaim", klog.KObj(ac))
-					return framework.AsStatus(err)
+					return kubeschedulerframework.AsStatus(err)
 				}
 			}
 			klog.InfoS("no GPU available for pod", "pod", klog.KObj(pod), "node", node.Name)
-			return framework.NewStatus(framework.Unschedulable, "no GPU available")
+			return kubeschedulerframework.NewStatus(kubeschedulerframework.Unschedulable, "no GPU available")
 		}
 	}
 
@@ -484,16 +490,17 @@ func (p *Plugin) Filter(ctx context.Context, state *framework.CycleState, pod *c
 
 // Score favors nodes with the most remaining free MIG slice capacity after
 // accounting for all AllocationClaims including those staged for this Pod.
-func (p *Plugin) Score(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeName string) (int64, *framework.Status) {
+func (p *Plugin) Score(ctx context.Context, state kubeschedulerframework.CycleState, pod *corev1.Pod, nodeInfo kubeschedulerframework.NodeInfo) (int64, *kubeschedulerframework.Status) {
+	nodeName := nodeInfo.Node().Name
 	instObj, err := p.instasliceLister.NodeAccelerators(p.namespace).Get(nodeName)
 	if err != nil {
-		return 0, framework.AsStatus(err)
+		return 0, kubeschedulerframework.AsStatus(err)
 	}
 
 	var resources instav1alpha1.DiscoveredNodeResources
 	if len(instObj.Status.NodeResources.Raw) > 0 {
 		if err := json.Unmarshal(instObj.Status.NodeResources.Raw, &resources); err != nil {
-			return 0, framework.AsStatus(err)
+			return 0, kubeschedulerframework.AsStatus(err)
 		}
 	}
 
@@ -501,7 +508,7 @@ func (p *Plugin) Score(ctx context.Context, state *framework.CycleState, pod *co
 	for _, gpu := range resources.NodeGPUs {
 		idx, err := p.gpuAllocatedSlices(nodeName, gpu.GPUUUID, "")
 		if err != nil {
-			return 0, framework.AsStatus(err)
+			return 0, kubeschedulerframework.AsStatus(err)
 		}
 		totalSlots += int32(len(idx))
 		for _, v := range idx {
@@ -519,18 +526,32 @@ func (p *Plugin) Score(ctx context.Context, state *framework.CycleState, pod *co
 	return score, nil
 }
 
+// PreBindPreFlight checks if this plugin needs to handle the pod in PreBind.
+// Returns Success if there are AllocationClaims for the pod, Skip otherwise.
+func (p *Plugin) PreBindPreFlight(ctx context.Context, state kubeschedulerframework.CycleState, pod *corev1.Pod, nodeName string) *kubeschedulerframework.Status {
+	items, err := p.allocationIndexer.ByIndex("pod-uid", string(pod.UID))
+	if err != nil {
+		return kubeschedulerframework.AsStatus(err)
+	}
+	if len(items) == 0 {
+		return kubeschedulerframework.NewStatus(kubeschedulerframework.Skip, "no AllocationClaims for pod")
+	}
+	return nil
+}
+
 // PreBind finalizes AllocationClaims on the chosen node and cleans up staged
 // claims on the other nodes.
-func (p *Plugin) PreBind(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeName string) *framework.Status {
+func (p *Plugin) PreBind(ctx context.Context, state kubeschedulerframework.CycleState, pod *corev1.Pod, nodeName string) *kubeschedulerframework.Status {
 	klog.InfoS("pre-binding pod to node", "pod", klog.KObj(pod), "node", nodeName)
 	items, err := p.allocationIndexer.ByIndex("pod-uid", string(pod.UID))
 	if err != nil {
-		return framework.AsStatus(err)
+		return kubeschedulerframework.AsStatus(err)
 	}
 
+	// If no AllocationClaims found, this is a non-GPU pod - allow binding to proceed.
 	if len(items) == 0 {
-		klog.InfoS("no staged AllocationClaims found for pod", "pod", klog.KObj(pod), "node", nodeName)
-		return framework.AsStatus(fmt.Errorf("no staged AllocationClaims found for pod %s on node %s", pod.Name, nodeName))
+		klog.V(4).InfoS("no AllocationClaims found for pod (non-GPU workload)", "pod", klog.KObj(pod), "node", nodeName)
+		return nil
 	}
 	for _, obj := range items {
 		alloc, ok := obj.(*instav1alpha1.AllocationClaim)
@@ -546,13 +567,13 @@ func (p *Plugin) PreBind(ctx context.Context, state *framework.CycleState, pod *
 			if alloc.Status.State != instav1alpha1.AllocationClaimStatusCreated {
 				updated, err := deviceplugins.UpdateAllocationStatus(ctx, p.instaClient, alloc, instav1alpha1.AllocationClaimStatusCreated)
 				if err != nil {
-					return framework.AsStatus(err)
+					return kubeschedulerframework.AsStatus(err)
 				}
 				p.indexerUpdate(updated)
 			}
 		} else {
 			if err := p.instaClient.OpenShiftOperatorV1alpha1().AllocationClaims(alloc.Namespace).Delete(ctx, alloc.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-				return framework.AsStatus(err)
+				return kubeschedulerframework.AsStatus(err)
 			}
 			p.indexerDelete(alloc)
 		}
@@ -565,13 +586,16 @@ func (p *Plugin) ScoreExtensions() framework.ScoreExtensions { return nil }
 
 // The helper functions below are mostly moved from the legacy scheduler.
 
+// migProfileRegex matches MIG profile patterns like "1g.5gb", "2g.10gb", or with compute instances "1c.1g.5gb".
+// It captures the full profile name for use in allocation.
+var migProfileRegex = regexp.MustCompile(`((?:\d+c\.)?\d+g\.\d+gb)`)
+
 func extractProfileNames(limits corev1.ResourceList) []string {
 	var profiles []string
 	for k, v := range limits {
 		key := k.String()
 		if strings.Contains(key, "nvidia.com/mig-") || strings.Contains(key, "mig.das.com/") {
-			re := regexp.MustCompile(`(\d+g\.\d+gb)`)
-			match := re.FindStringSubmatch(key)
+			match := migProfileRegex.FindStringSubmatch(key)
 			if len(match) > 1 {
 				count := v.Value()
 				if count < 1 {
@@ -641,27 +665,24 @@ func getPodProfileNames(pod *corev1.Pod) []string {
 	return profiles
 }
 
+// extractGpuProfile looks up the MIG profile in the discovered resources and returns
+// its placement size, GI profile ID, CI profile ID, and CI engine profile ID.
+// If the profile is not found, it returns (0, 0, 0, 0) and logs a warning.
 func extractGpuProfile(resources instav1alpha1.DiscoveredNodeResources, profileName string) (int32, int32, int32, int32) {
-	var size int32
-	var discoveredGiprofile int32
-	var Ciprofileid int32
-	var Ciengprofileid int32
-	for profName, placement := range resources.MigPlacement {
-		if profName == profileName {
-			for _, aPlacement := range placement.Placements {
-				size = aPlacement.Size
-				discoveredGiprofile = placement.GIProfileID
-				Ciprofileid = placement.CIProfileID
-				Ciengprofileid = placement.CIEngProfileID
-				break
-			}
-		}
+	placement, exists := resources.MigPlacement[profileName]
+	if !exists {
+		klog.V(4).InfoS("MIG profile not found in node resources", "profile", profileName)
+		return 0, 0, 0, 0
 	}
-	return size, discoveredGiprofile, Ciprofileid, Ciengprofileid
+	if len(placement.Placements) == 0 {
+		klog.V(4).InfoS("MIG profile has no placements", "profile", profileName)
+		return 0, 0, 0, 0
+	}
+	return placement.Placements[0].Size, placement.GIProfileID, placement.CIProfileID, placement.CIEngProfileID
 }
 
 // getStartIndexFromAllocationResults finds a free placement index on the GPU
-// that satisfies the requested MIG profile. It returns 9 when no slot exists.
+// that satisfies the requested MIG profile. It returns NoSlotAvailable when no slot exists.
 func getStartIndexFromAllocationResults(resources instav1alpha1.DiscoveredNodeResources, profileName string, gpuAllocatedIndex [8]int32) int32 {
 	allAllocated := true
 	for _, allocated := range gpuAllocatedIndex {
@@ -671,7 +692,7 @@ func getStartIndexFromAllocationResults(resources instav1alpha1.DiscoveredNodeRe
 		}
 	}
 	if allAllocated {
-		return int32(9)
+		return NoSlotAvailable
 	}
 	var neededContinousSlot int32
 	var possiblePlacements []int32
@@ -684,7 +705,7 @@ func getStartIndexFromAllocationResults(resources instav1alpha1.DiscoveredNodeRe
 			break
 		}
 	}
-	var newStart = int32(9)
+	var newStart = NoSlotAvailable
 	for _, value := range possiblePlacements {
 		if gpuAllocatedIndex[value] == 0 {
 			if neededContinousSlot == 1 {

@@ -8,10 +8,10 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
-	github.com/openshift/api v0.0.0-20250226153854-e8e096a21cb3
-	github.com/openshift/build-machinery-go v0.0.0-20250211133638-a00a772ae1a2
-	github.com/openshift/client-go v0.0.0-20250131180035-f7ec47e2d87a
-	github.com/openshift/library-go v0.0.0-20250218150059-017e5b6cf27c
+	github.com/openshift/api v0.0.0-20251204164930-cd2e40c5883a
+	github.com/openshift/build-machinery-go v0.0.0-20250530140348-dc5b2804eeee
+	github.com/openshift/client-go v0.0.0-20251205093018-96a6cbc1420c
+	github.com/openshift/library-go v0.0.0-20251205073205-ab8d51820e0b
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/cobra v1.10.1
 	github.com/spf13/pflag v1.0.10
@@ -23,6 +23,7 @@ require (
 	k8s.io/code-generator v0.34.2
 	k8s.io/component-base v0.34.3
 	k8s.io/klog/v2 v2.130.1
+	k8s.io/kube-scheduler v0.34.1
 	k8s.io/kubelet v0.34.3
 	k8s.io/kubernetes v1.34.1
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
@@ -30,7 +31,7 @@ require (
 	sigs.k8s.io/controller-tools v0.17.2
 	sigs.k8s.io/kueue v0.15.0
 	sigs.k8s.io/scheduler-plugins v0.34.1-devel
-	sigs.k8s.io/structured-merge-diff/v4 v4.6.0
+	sigs.k8s.io/structured-merge-diff/v6 v6.3.1
 	tags.cncf.io/container-device-interface v0.8.1
 	tags.cncf.io/container-device-interface/specs-go v0.8.0
 )
@@ -150,13 +151,11 @@ require (
 	k8s.io/dynamic-resource-allocation v0.34.3 // indirect
 	k8s.io/gengo/v2 v2.0.0-20250820003526-c297c0c1eb9d // indirect
 	k8s.io/kms v0.34.3 // indirect
-	k8s.io/kube-aggregator v0.32.1 // indirect
+	k8s.io/kube-aggregator v0.34.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20251125145642-4e65d59e963e // indirect
-	k8s.io/kube-scheduler v0.34.1 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.33.0 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/kube-storage-version-migrator v0.0.6-0.20230721195810-5c8923c5ff96 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
-	sigs.k8s.io/structured-merge-diff/v6 v6.3.1 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )

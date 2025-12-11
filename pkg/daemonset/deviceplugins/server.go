@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -51,7 +50,6 @@ type Server struct {
 	DynamicClient    dynamic.Interface
 	NodeName         string
 	EmulatedMode     instav1.EmulatedMode
-	allocMutex       sync.Mutex
 }
 
 const allocationAnnotationKey = "mig.das.com/allocation"
@@ -165,9 +163,10 @@ func (s *Server) ListAndWatch(req *pluginapi.Empty, stream pluginapi.DevicePlugi
 		}
 	}
 
-	// Detect system reboot by comparing in-use allocations with on-disk CDI specs
-	// TODO : filter out CDI specs and AllocationClaims that are not relevant to this server's resource
-	// because it will race with other servers that will be running on the same node.
+	// Detect system reboot by comparing in-use allocations with on-disk CDI specs.
+	// Both CDI specs (filtered by expectedKind above) and AllocationClaims (filtered by
+	// node-MigProfile index below) are scoped to this server's specific resource type,
+	// so multiple servers running on the same node for different resources won't interfere.
 	var inUseAllocs []*instav1.AllocationClaim
 
 	// Skip allocation checking for GPU memory resource as it doesn't use AllocationClaims.
@@ -177,19 +176,23 @@ func (s *Server) ListAndWatch(req *pluginapi.Empty, stream pluginapi.DevicePlugi
 		key := fmt.Sprintf("%s/%s", s.NodeName, migProfile)
 
 		if allocationIndexer != nil {
-			s.allocMutex.Lock()
+			// Hold the lock while building the list of in-use allocations to avoid
+			// race conditions where allocations could be modified during iteration.
+			allocationMutex.Lock()
 			objs, err := allocationIndexer.ByIndex("node-MigProfile", key)
-			s.allocMutex.Unlock()
 			if err != nil {
+				allocationMutex.Unlock()
 				klog.ErrorS(err, "failed to lookup allocations by index", "key", key)
 			} else {
 				for _, obj := range objs {
 					if a, ok := obj.(*instav1.AllocationClaim); ok {
 						if a.Status.State == instav1.AllocationClaimStatusInUse {
-							inUseAllocs = append(inUseAllocs, a)
+							// Make a deep copy to avoid races when accessing allocation data later
+							inUseAllocs = append(inUseAllocs, a.DeepCopy())
 						}
 					}
 				}
+				allocationMutex.Unlock()
 			}
 		}
 	}
@@ -218,9 +221,9 @@ func (s *Server) ListAndWatch(req *pluginapi.Empty, stream pluginapi.DevicePlugi
 				return fmt.Errorf("failed to delete allocation %s: %w", alloc.Name, err)
 			}
 
-			s.allocMutex.Lock()
+			allocationMutex.Lock()
 			allocationIndexer.Delete(alloc)
-			s.allocMutex.Unlock()
+			allocationMutex.Unlock()
 		}
 
 		// Delete associated pods to mitigate kubelet bug which is admits the pods before the device plugin is ready
@@ -275,7 +278,7 @@ func (s *Server) allocateGPUMemory(ctx context.Context, req *pluginapi.AllocateR
 	}
 
 	for i, cr := range containerRequests {
-		deviceCount := len(cr.GetDevicesIDs())
+		deviceCount := len(cr.GetDevicesIds())
 		klog.InfoS("Allocating GPU memory devices", "container", i, "deviceCount", deviceCount)
 
 		// GPU memory resources are virtual - no actual device allocation needed.
@@ -298,7 +301,7 @@ func (s *Server) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (
 
 	total := 0
 	for _, cr := range req.GetContainerRequests() {
-		ids := cr.GetDevicesIDs()
+		ids := cr.GetDevicesIds()
 		if len(ids) == 0 {
 			total++
 		} else {
@@ -322,7 +325,7 @@ func (s *Server) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (
 	for i, cr := range req.GetContainerRequests() {
 		resp.ContainerResponses[i] = &pluginapi.ContainerAllocateResponse{}
 
-		ids := cr.GetDevicesIDs()
+		ids := cr.GetDevicesIds()
 		if len(ids) == 0 {
 			ids = []string{string(utiluuid.NewUUID())}
 		}
@@ -381,7 +384,7 @@ func (s *Server) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (
 		if err != nil {
 			return nil, err
 		}
-		resp.ContainerResponses[i].CDIDevices = append(resp.ContainerResponses[i].CDIDevices, cdiDevices...)
+		resp.ContainerResponses[i].CdiDevices = append(resp.ContainerResponses[i].CdiDevices, cdiDevices...)
 	}
 
 	return resp, nil
@@ -441,11 +444,11 @@ func (s *Server) markAllocationInUse(ctx context.Context, alloc *instav1.Allocat
 		meta.SetStatusCondition(&updated.Status.Conditions, cond)
 	}
 
-	s.allocMutex.Lock()
+	allocationMutex.Lock()
 	if err := allocationIndexer.Update(updated); err != nil {
 		klog.ErrorS(err, "failed to update allocation in indexer", "allocation", updated.Name)
 	}
-	s.allocMutex.Unlock()
+	allocationMutex.Unlock()
 	return nil
 }
 
@@ -577,8 +580,8 @@ func (s *Server) getAllocationsByNodeGPU(ctx context.Context, nodeName, profileN
 	// First fetch the requested AllocationClaims from the indexer. We retry
 	// a few times in case the informer cache hasn't synced yet.
 	err := wait.ExponentialBackoff(wait.Backoff{Duration: 100 * time.Millisecond, Factor: 2, Steps: 5}, func() (bool, error) {
-		s.allocMutex.Lock()
-		defer s.allocMutex.Unlock()
+		allocationMutex.Lock()
+		defer allocationMutex.Unlock()
 
 		objs, err := allocationIndexer.ByIndex("node-MigProfile", key)
 		if err != nil {
@@ -594,7 +597,8 @@ func (s *Server) getAllocationsByNodeGPU(ctx context.Context, nodeName, profileN
 					continue
 				}
 				if spec.Profile == migProfile && a.Status.State == instav1.AllocationClaimStatusCreated {
-					out = append(out, a)
+					// Deep copy to avoid race conditions when accessing allocations after releasing the lock
+					out = append(out, a.DeepCopy())
 					if len(out) == count {
 						break
 					}
@@ -620,11 +624,11 @@ func (s *Server) getAllocationsByNodeGPU(ctx context.Context, nodeName, profileN
 			return nil, fmt.Errorf("failed to update allocation status for %q: %w", a.Name, err)
 		}
 
-		s.allocMutex.Lock()
+		allocationMutex.Lock()
 		if err := allocationIndexer.Update(a); err != nil {
 			klog.ErrorS(err, "failed to update allocation in indexer", "allocation", a.Name)
 		}
-		s.allocMutex.Unlock()
+		allocationMutex.Unlock()
 
 		klog.InfoS("Updated allocation status to Processing", "allocation", a.Name, "status", a.Status.State)
 	}
@@ -632,10 +636,10 @@ func (s *Server) getAllocationsByNodeGPU(ctx context.Context, nodeName, profileN
 	return result[:count], nil
 }
 
-// BuildCDIDevices builds a CDI spec and returns the spec object, spec name,
+// BuildCdiDevices builds a CDI spec and returns the spec object, spec name,
 // spec path, and the corresponding CDIDevice slice. This helper is exported so
 // that other packages (and tests) can generate CDI specs in a consistent way.
-func BuildCDIDevices(kind, sanitizedClass, id string, annotations map[string]string, envVar string) (*cdispec.Spec, string, string, []*pluginapi.CDIDevice) {
+func BuildCdiDevices(kind, sanitizedClass, id string, annotations map[string]string, envVar string) (*cdispec.Spec, string, string, []*pluginapi.CDIDevice) {
 	specNameBase := fmt.Sprintf("%s_%s", sanitizedClass, id)
 	specName := specNameBase + ".cdi.json"
 
@@ -687,8 +691,8 @@ func BuildCDIDevices(kind, sanitizedClass, id string, annotations map[string]str
 }
 
 // WriteCDISpecForResource parses the given resource name, generates a CDI spec
-// using BuildCDIDevices and writes it to the CDI cache. It returns the path to
-// the written spec along with the generated CDIDevices.
+// using BuildCdiDevices and writes it to the CDI cache. It returns the path to
+// the written spec along with the generated CdiDevices.
 func WriteCDISpecForResource(resourceName string, id string, annotations map[string]string, envVar string) (string, []*pluginapi.CDIDevice, error) {
 	vendor, class := parser.ParseQualifier(resourceName)
 	sanitizedClass := class
@@ -700,7 +704,7 @@ func WriteCDISpecForResource(resourceName string, id string, annotations map[str
 		kind = vendor + "/" + sanitizedClass
 	}
 
-	specObj, specName, specPath, cdiDevices := BuildCDIDevices(kind, sanitizedClass, id, annotations, envVar)
+	specObj, specName, specPath, cdiDevices := BuildCdiDevices(kind, sanitizedClass, id, annotations, envVar)
 
 	// Wait for any previous spec with the same name to be removed. This is
 	// important for transient specs tied to container lifecycles. The
