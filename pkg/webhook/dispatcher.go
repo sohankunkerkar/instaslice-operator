@@ -42,6 +42,48 @@ func NewDispatcher(hook Webhook) *Dispatcher {
 	}
 }
 
+// WorkloadDispatcher struct for Workload webhook
+type WorkloadDispatcher struct {
+	hook WorkloadWebhook
+}
+
+// NewWorkloadDispatcher creates a new WorkloadDispatcher
+func NewWorkloadDispatcher(hook WorkloadWebhook) *WorkloadDispatcher {
+	return &WorkloadDispatcher{
+		hook: hook,
+	}
+}
+
+// HandleRequest handles Workload webhook requests
+func (d *WorkloadDispatcher) HandleRequest(w http.ResponseWriter, r *http.Request) {
+	klog.InfoS("Handling Workload webhook request", "requestURI", r.RequestURI)
+	_, err := url.Parse(r.RequestURI)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		klog.ErrorS(err, "Failed to parse request URL", "requestURI", r.RequestURI)
+		SendResponse(w, admissionctl.Errored(http.StatusBadRequest, err))
+		return
+	}
+
+	request, _, err := ParseHTTPRequest(r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		klog.ErrorS(err, "Error parsing HTTP request body")
+		SendResponse(w, admissionctl.Errored(http.StatusBadRequest, err))
+		return
+	}
+
+	resp := d.hook.Authorized(request)
+	if err := resp.Complete(request); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		klog.ErrorS(err, "Failed to complete response")
+		SendResponse(w, admissionctl.Errored(http.StatusInternalServerError, err))
+		return
+	}
+
+	SendResponse(w, resp)
+}
+
 // HandleRequest http request
 func (d *Dispatcher) HandleRequest(w http.ResponseWriter, r *http.Request) {
 	klog.InfoS("Handling webhook request", "requestURI", r.RequestURI)

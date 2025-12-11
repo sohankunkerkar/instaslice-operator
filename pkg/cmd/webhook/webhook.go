@@ -50,12 +50,20 @@ func NewWebhook(ctx context.Context) *cobra.Command {
 }
 
 func startServer() {
-	hook := webhook.NewWebhook()
-	dispatcher := webhook.NewDispatcher(hook)
+	// Pod webhook (existing)
+	podHook := webhook.NewWebhook()
+	podDispatcher := webhook.NewDispatcher(podHook)
 
-	http.HandleFunc(hook.GetURI(), dispatcher.HandleRequest)
-	http.HandleFunc(hook.GetReadinessURI(), dispatcher.HandleReadiness)
-	http.HandleFunc(hook.GetHealthzURI(), dispatcher.HandleHealthz)
+	http.HandleFunc(podHook.GetURI(), podDispatcher.HandleRequest)
+	http.HandleFunc(podHook.GetReadinessURI(), podDispatcher.HandleReadiness)
+	http.HandleFunc(podHook.GetHealthzURI(), podDispatcher.HandleHealthz)
+
+	// Workload webhook (new - for Kueue integration)
+	workloadHook := webhook.NewWorkloadWebhook()
+	workloadDispatcher := webhook.NewWorkloadDispatcher(workloadHook)
+
+	http.HandleFunc(workloadHook.GetURI(), workloadDispatcher.HandleRequest)
+	klog.InfoS("Registered Workload webhook", "uri", workloadHook.GetURI())
 
 	if testHooks {
 		os.Exit(0)

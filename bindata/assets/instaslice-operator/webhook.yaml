@@ -12,6 +12,7 @@ metadata:
     app.kubernetes.io/part-of: das-operator
   name: das-mutating-webhook-configuration
 webhooks:
+# Pod webhook - mutates pods for DAS scheduler
 - admissionReviewVersions:
   - v1
   clientConfig:
@@ -21,7 +22,7 @@ webhooks:
       path: /mutate-pod
       port: 8443
   failurePolicy: Fail
-  name: instaslice.redhat.com
+  name: pod.instaslice.redhat.com
   namespaceSelector:
     matchExpressions:
     - key: kubernetes.io/metadata.name
@@ -41,4 +42,38 @@ webhooks:
     - CREATE
     resources:
     - pods
+  sideEffects: None
+# Workload webhook - mutates Kueue Workloads for admission control
+# This enables proper GPU memory quota enforcement for all workload types
+# (Jobs, RayJobs, PyTorchJobs, Deployments, StatefulSets, etc.)
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: das-operator-webhook
+      namespace: das-operator
+      path: /mutate-workload
+      port: 8443
+  failurePolicy: Ignore
+  name: workload.instaslice.redhat.com
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: NotIn
+      values:
+      - das-operator
+      - cert-manager
+      - kube-system
+      - openshift-operators
+      - openshift-marketplace
+  rules:
+  - apiGroups:
+    - kueue.x-k8s.io
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - workloads
   sideEffects: None

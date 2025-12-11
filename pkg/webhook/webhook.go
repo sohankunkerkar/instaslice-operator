@@ -131,6 +131,19 @@ func (s *InstasliceWebhook) mutatePod(pod *corev1.Pod) ([]byte, error) {
 	// Track MIG profiles for DAS scheduler via annotations (Kueue-managed Pods only).
 	migProfiles := make(map[string]int64)
 
+	// Check if the Workload webhook has already injected GPU memory resource.
+	// This happens when the Pod comes from a Kueue-managed Job/Workload.
+	gpuMemoryAlreadyInjected := false
+	for _, c := range mutatedPod.Spec.Containers {
+		if c.Resources.Limits != nil {
+			if _, exists := c.Resources.Limits[corev1.ResourceName(constants.GPUMemoryResource)]; exists {
+				gpuMemoryAlreadyInjected = true
+				klog.V(4).InfoS("GPU memory already injected by Workload webhook, skipping re-injection", "name", pod.Name)
+				break
+			}
+		}
+	}
+
 	mutateResources := func(c *corev1.Container) {
 		if c.Resources.Limits == nil {
 			return
@@ -158,11 +171,13 @@ func (s *InstasliceWebhook) mutatePod(pod *corev1.Pod) ([]byte, error) {
 				}
 				needsScheduler = true
 
-				// Extract GPU memory from profile and accumulate.
-				memGB := extractGPUMemoryFromProfile(profile)
-				if memGB > 0 {
-					totalGPUMemory += memGB * qty.Value()
-					klog.InfoS("extracted GPU memory from profile", "profile", profile, "memoryGB", memGB, "quantity", qty.Value(), "totalMemory", totalGPUMemory)
+				// Extract GPU memory from profile and accumulate (only if not already injected).
+				if !gpuMemoryAlreadyInjected {
+					memGB := extractGPUMemoryFromProfile(profile)
+					if memGB > 0 {
+						totalGPUMemory += memGB * qty.Value()
+						klog.InfoS("extracted GPU memory from profile", "profile", profile, "memoryGB", memGB, "quantity", qty.Value(), "totalMemory", totalGPUMemory)
+					}
 				}
 			case strings.HasPrefix(key, constants.NVIDIAResourcePrefix):
 				newKey := corev1.ResourceName(strings.Replace(key, constants.NVIDIAResourcePrefix, constants.MIGResourcePrefix, 1))
@@ -174,19 +189,21 @@ func (s *InstasliceWebhook) mutatePod(pod *corev1.Pod) ([]byte, error) {
 				newLimits[name] = qty
 				if strings.HasPrefix(key, constants.MIGResourcePrefix) {
 					needsScheduler = true
-					// Extract GPU memory from existing MIG profile resource.
-					profile := strings.TrimPrefix(key, constants.MIGResourcePrefix)
-					memGB := extractGPUMemoryFromProfile(profile)
-					if memGB > 0 {
-						totalGPUMemory += memGB * qty.Value()
-						klog.InfoS("extracted GPU memory from existing profile", "profile", profile, "memoryGB", memGB, "quantity", qty.Value(), "totalMemory", totalGPUMemory)
+					// Extract GPU memory from existing MIG profile resource (only if not already injected).
+					if !gpuMemoryAlreadyInjected {
+						profile := strings.TrimPrefix(key, constants.MIGResourcePrefix)
+						memGB := extractGPUMemoryFromProfile(profile)
+						if memGB > 0 {
+							totalGPUMemory += memGB * qty.Value()
+							klog.InfoS("extracted GPU memory from existing profile", "profile", profile, "memoryGB", memGB, "quantity", qty.Value(), "totalMemory", totalGPUMemory)
+						}
 					}
 				}
 			}
 		}
 
-		// Inject GPU memory resource if we found any MIG profiles.
-		if totalGPUMemory > 0 {
+		// Inject GPU memory resource if we found any MIG profiles and it wasn't already injected.
+		if totalGPUMemory > 0 && !gpuMemoryAlreadyInjected {
 			gpuMemResource := corev1.ResourceName(constants.GPUMemoryResource)
 			gpuMemQuantity := resource.NewQuantity(totalGPUMemory, resource.DecimalSI)
 			newLimits[gpuMemResource] = *gpuMemQuantity
