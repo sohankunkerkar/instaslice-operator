@@ -42,21 +42,30 @@ func NewDispatcher(hook Webhook) *Dispatcher {
 	}
 }
 
-// WorkloadDispatcher struct for Workload webhook
-type WorkloadDispatcher struct {
-	hook WorkloadWebhook
+// GenericWebhook interface for any webhook that implements Authorized
+type GenericWebhook interface {
+	Authorized(request admissionctl.Request) admissionctl.Response
+	GetURI() string
+	Name() string
 }
 
-// NewWorkloadDispatcher creates a new WorkloadDispatcher
-func NewWorkloadDispatcher(hook WorkloadWebhook) *WorkloadDispatcher {
-	return &WorkloadDispatcher{
+// GenericDispatcher handles requests for any webhook implementing GenericWebhook
+type GenericDispatcher struct {
+	hook GenericWebhook
+	name string
+}
+
+// NewGenericDispatcher creates a new GenericDispatcher
+func NewGenericDispatcher(hook GenericWebhook) *GenericDispatcher {
+	return &GenericDispatcher{
 		hook: hook,
+		name: hook.Name(),
 	}
 }
 
-// HandleRequest handles Workload webhook requests
-func (d *WorkloadDispatcher) HandleRequest(w http.ResponseWriter, r *http.Request) {
-	klog.InfoS("Handling Workload webhook request", "requestURI", r.RequestURI)
+// HandleRequest handles webhook requests generically
+func (d *GenericDispatcher) HandleRequest(w http.ResponseWriter, r *http.Request) {
+	klog.InfoS("Handling webhook request", "webhook", d.name, "requestURI", r.RequestURI)
 	_, err := url.Parse(r.RequestURI)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)

@@ -47,8 +47,8 @@ func TestMutatePodNvidiaResource(t *testing.T) {
 		t.Fatalf("failed to unmarshal mutated pod: %v", err)
 	}
 
-	if mutated.Spec.SchedulerName != secondaryScheduler {
-		t.Fatalf("expected scheduler %s, got %s", secondaryScheduler, mutated.Spec.SchedulerName)
+	if mutated.Spec.SchedulerName != constants.DASSchedulerName {
+		t.Fatalf("expected scheduler %s, got %s", constants.DASSchedulerName, mutated.Spec.SchedulerName)
 	}
 
 	if mutated.Spec.RuntimeClassName == nil || *mutated.Spec.RuntimeClassName != "nvidia-legacy" {
@@ -100,7 +100,7 @@ func TestMutatePodEphemeralNvidiaResource(t *testing.T) {
 	if err := json.Unmarshal(data, mutated); err != nil {
 		t.Fatalf("unmarshal mutated pod: %v", err)
 	}
-	if mutated.Spec.SchedulerName != secondaryScheduler {
+	if mutated.Spec.SchedulerName != constants.DASSchedulerName {
 		t.Fatalf("expected scheduler set")
 	}
 	if mutated.Spec.RuntimeClassName == nil || *mutated.Spec.RuntimeClassName != "nvidia-legacy" {
@@ -150,7 +150,7 @@ func TestMutatePodOverrideValues(t *testing.T) {
 		t.Fatalf("unmarshal mutated pod: %v", err)
 	}
 
-	if mutated.Spec.SchedulerName != secondaryScheduler {
+	if mutated.Spec.SchedulerName != constants.DASSchedulerName {
 		t.Fatalf("scheduler not overridden")
 	}
 	if mutated.Spec.RuntimeClassName == nil || *mutated.Spec.RuntimeClassName != "nvidia-legacy" {
@@ -204,7 +204,7 @@ func TestMutatePodInstaResource(t *testing.T) {
 	if err := json.Unmarshal(data, mutated); err != nil {
 		t.Fatalf("unmarshal mutated pod: %v", err)
 	}
-	if mutated.Spec.SchedulerName != secondaryScheduler {
+	if mutated.Spec.SchedulerName != constants.DASSchedulerName {
 		t.Fatalf("expected scheduler set")
 	}
 	if mutated.Spec.RuntimeClassName == nil || *mutated.Spec.RuntimeClassName != "nvidia-legacy" {
@@ -298,7 +298,7 @@ func TestMutatePodKueueManaged(t *testing.T) {
 	}
 
 	// Should use DAS scheduler
-	if mutated.Spec.SchedulerName != secondaryScheduler {
+	if mutated.Spec.SchedulerName != constants.DASSchedulerName {
 		t.Fatalf("expected DAS scheduler to be set")
 	}
 }
@@ -355,7 +355,7 @@ func TestMutatePodNonKueue(t *testing.T) {
 	}
 
 	// Should use DAS scheduler
-	if mutated.Spec.SchedulerName != secondaryScheduler {
+	if mutated.Spec.SchedulerName != constants.DASSchedulerName {
 		t.Fatalf("expected DAS scheduler to be set")
 	}
 }
@@ -644,7 +644,7 @@ func TestMutatePodGPUMemoryAlreadyInjected(t *testing.T) {
 	}
 
 	// Should still use DAS scheduler
-	if mutated.Spec.SchedulerName != secondaryScheduler {
+	if mutated.Spec.SchedulerName != constants.DASSchedulerName {
 		t.Fatalf("expected DAS scheduler to be set")
 	}
 

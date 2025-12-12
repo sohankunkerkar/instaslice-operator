@@ -2,11 +2,7 @@ package webhook
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 
 	admissionctl "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -18,16 +14,11 @@ import (
 	"github.com/openshift/instaslice-operator/pkg/constants"
 )
 
-// migProfileRegex is compiled once at package init for efficient reuse.
-// Matches patterns like "1g.5gb", "2g.10gb", "1c.1g.5gb", etc.
-var migProfileRegex = regexp.MustCompile(`(?:\d+c\.)?(\d+)g\.(\d+)gb`)
-
 const (
 	URI                  string = "/mutate-pod"
 	ReadinessEndpointURI string = "/readyz"
 	HealthzEndpointURI   string = "/healthz"
 	WebhookName          string = "das-webhook"
-	secondaryScheduler   string = "das-scheduler"
 )
 
 // Webhook interface
@@ -48,18 +39,6 @@ type InstasliceWebhook struct{}
 
 func NewWebhook() Webhook {
 	return &InstasliceWebhook{}
-}
-
-// extractGPUMemoryFromProfile extracts the GPU memory in GB from a MIG profile string.
-// Uses the pre-compiled migProfileRegex for efficiency.
-func extractGPUMemoryFromProfile(profile string) int64 {
-	matches := migProfileRegex.FindStringSubmatch(profile)
-	if len(matches) >= 3 {
-		if memGB, err := strconv.ParseInt(matches[2], 10, 64); err == nil {
-			return memGB
-		}
-	}
-	return 0
 }
 
 // GetURI implements Webhook interface
@@ -238,11 +217,11 @@ func (s *InstasliceWebhook) mutatePod(pod *corev1.Pod) ([]byte, error) {
 	}
 
 	if needsScheduler {
-		mutatedPod.Spec.SchedulerName = secondaryScheduler
+		mutatedPod.Spec.SchedulerName = constants.DASSchedulerName
 		klog.InfoS("using secondary scheduler", "name", mutatedPod.Name)
 		// Set nvidia-legacy runtime for MIG workloads to avoid CDI resolution issues
 		// with the nvidia runtime's CDI mode
-		runtimeClass := "nvidia-legacy"
+		runtimeClass := constants.NvidiaLegacyRuntimeClass
 		mutatedPod.Spec.RuntimeClassName = &runtimeClass
 		klog.InfoS("setting runtimeClassName for MIG workload", "name", mutatedPod.Name, "runtimeClassName", runtimeClass)
 	}
@@ -251,20 +230,7 @@ func (s *InstasliceWebhook) mutatePod(pod *corev1.Pod) ([]byte, error) {
 		if mutatedPod.Annotations == nil {
 			mutatedPod.Annotations = make(map[string]string)
 		}
-
-		// Sort profile keys for deterministic annotation output.
-		profileKeys := make([]string, 0, len(migProfiles))
-		for profile := range migProfiles {
-			profileKeys = append(profileKeys, profile)
-		}
-		sort.Strings(profileKeys)
-
-		// Serialize MIG profiles to annotation: "1g.5gb:1,2g.10gb:2"
-		migData := make([]string, 0, len(migProfiles))
-		for _, profile := range profileKeys {
-			migData = append(migData, fmt.Sprintf("%s:%d", profile, migProfiles[profile]))
-		}
-		mutatedPod.Annotations[constants.MIGProfileAnnotation] = strings.Join(migData, ",")
+		mutatedPod.Annotations[constants.MIGProfileAnnotation] = SerializeMIGProfiles(migProfiles)
 		klog.InfoS("added MIG profiles to Pod annotations for Kueue-managed Pod", "annotation", mutatedPod.Annotations[constants.MIGProfileAnnotation])
 	}
 
@@ -273,15 +239,11 @@ func (s *InstasliceWebhook) mutatePod(pod *corev1.Pod) ([]byte, error) {
 }
 
 func (s *InstasliceWebhook) renderPod(request admissionctl.Request) (*corev1.Pod, error) {
-	var err error
 	klog.InfoS("Rendering Pod from request", "uid", request.UID)
 	decoder := admissionctl.NewDecoder(scheme)
 	pod := &corev1.Pod{}
-	if len(request.OldObject.Raw) > 0 {
-		err = decoder.DecodeRaw(request.OldObject, pod)
-	} else {
-		err = decoder.DecodeRaw(request.Object, pod)
-	}
-
+	// Always use Object (the new/current state) for both CREATE and UPDATE operations.
+	// Using OldObject on UPDATE would cause us to lose changes made by other controllers.
+	err := decoder.DecodeRaw(request.Object, pod)
 	return pod, err
 }

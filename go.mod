@@ -6,13 +6,16 @@ require (
 	github.com/NVIDIA/go-nvml v0.12.9-0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/uuid v1.6.0
+	github.com/kubeflow/training-operator v1.9.3
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
 	github.com/openshift/api v0.0.0-20251204164930-cd2e40c5883a
 	github.com/openshift/build-machinery-go v0.0.0-20250530140348-dc5b2804eeee
 	github.com/openshift/client-go v0.0.0-20251205093018-96a6cbc1420c
 	github.com/openshift/library-go v0.0.0-20251205073205-ab8d51820e0b
+	github.com/project-codeflare/appwrapper v1.1.2
 	github.com/prometheus/client_golang v1.23.2
+	github.com/ray-project/kuberay/ray-operator v1.5.1
 	github.com/spf13/cobra v1.10.1
 	github.com/spf13/pflag v1.0.10
 	google.golang.org/grpc v1.75.1
@@ -28,8 +31,10 @@ require (
 	k8s.io/kubernetes v1.34.1
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	sigs.k8s.io/controller-runtime v0.22.4
-	sigs.k8s.io/controller-tools v0.17.2
+	sigs.k8s.io/controller-tools v0.19.0
+	sigs.k8s.io/jobset v0.10.1
 	sigs.k8s.io/kueue v0.15.0
+	sigs.k8s.io/lws v0.7.0
 	sigs.k8s.io/scheduler-plugins v0.34.1-devel
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.1
 	tags.cncf.io/container-device-interface v0.8.1
@@ -87,7 +92,7 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
-	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/moby/term v0.5.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect

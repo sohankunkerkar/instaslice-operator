@@ -2,7 +2,9 @@ package webhook
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -12,98 +14,20 @@ import (
 	"github.com/openshift/instaslice-operator/pkg/constants"
 )
 
-// MIGMutationResult contains the results of mutating a pod template for MIG resources.
-type MIGMutationResult struct {
-	// NeedsDASScheduler indicates whether the DAS scheduler should be used.
-	NeedsDASScheduler bool
-	// TotalGPUMemoryGB is the total GPU memory in GB across all MIG profiles.
-	TotalGPUMemoryGB int64
-	// MIGProfiles maps MIG profile names to their requested quantities.
-	MIGProfiles map[string]int64
-}
+// migProfileRegex is compiled once at package init for efficient reuse.
+// Matches patterns like "1g.5gb", "2g.10gb", "1c.1g.5gb", etc.
+var migProfileRegex = regexp.MustCompile(`(?:\d+c\.)?(\d+)g\.(\d+)gb`)
 
-// ExtractMIGProfilesFromContainers extracts MIG profiles from container resource limits.
-// Returns the profiles map and total GPU memory in GB.
-func ExtractMIGProfilesFromContainers(containers []corev1.Container) (map[string]int64, int64) {
-	profiles := make(map[string]int64)
-	totalMemGB := int64(0)
-
-	for _, c := range containers {
-		if c.Resources.Limits == nil {
-			continue
-		}
-		for name, qty := range c.Resources.Limits {
-			key := string(name)
-			var profile string
-
-			switch {
-			case strings.HasPrefix(key, constants.NVIDIAMIGResourcePrefix):
-				profile = strings.TrimPrefix(key, constants.NVIDIAMIGResourcePrefix)
-			case strings.HasPrefix(key, constants.MIGResourcePrefix):
-				profile = strings.TrimPrefix(key, constants.MIGResourcePrefix)
-			default:
-				continue
-			}
-
-			quantity := qty.Value()
-			profiles[profile] += quantity
-
-			memGB := extractGPUMemoryFromProfile(profile)
-			if memGB > 0 {
-				totalMemGB += memGB * quantity
-			}
+// extractGPUMemoryFromProfile extracts the GPU memory in GB from a MIG profile string.
+// Uses the pre-compiled migProfileRegex for efficiency.
+func extractGPUMemoryFromProfile(profile string) int64 {
+	matches := migProfileRegex.FindStringSubmatch(profile)
+	if len(matches) >= 3 {
+		if memGB, err := strconv.ParseInt(matches[2], 10, 64); err == nil {
+			return memGB
 		}
 	}
-
-	return profiles, totalMemGB
-}
-
-// ExtractMIGProfilesFromInitContainers extracts MIG profiles from init containers.
-func ExtractMIGProfilesFromInitContainers(initContainers []corev1.Container) (map[string]int64, int64) {
-	return ExtractMIGProfilesFromContainers(initContainers)
-}
-
-// ExtractMIGProfilesFromEphemeralContainers extracts MIG profiles from ephemeral containers.
-func ExtractMIGProfilesFromEphemeralContainers(ephemeralContainers []corev1.EphemeralContainer) (map[string]int64, int64) {
-	// Convert ephemeral containers to regular containers for extraction
-	containers := make([]corev1.Container, 0, len(ephemeralContainers))
-	for _, ec := range ephemeralContainers {
-		containers = append(containers, corev1.Container{
-			Name:      ec.Name,
-			Resources: ec.Resources,
-		})
-	}
-	return ExtractMIGProfilesFromContainers(containers)
-}
-
-// ExtractMIGProfilesFromPodSpec extracts all MIG profiles from a PodSpec.
-// It combines profiles from regular, init, and ephemeral containers.
-func ExtractMIGProfilesFromPodSpec(podSpec *corev1.PodSpec) (map[string]int64, int64) {
-	allProfiles := make(map[string]int64)
-	totalMemGB := int64(0)
-
-	// Regular containers
-	profiles, memGB := ExtractMIGProfilesFromContainers(podSpec.Containers)
-	for p, q := range profiles {
-		allProfiles[p] += q
-	}
-	totalMemGB += memGB
-
-	// Init containers
-	profiles, memGB = ExtractMIGProfilesFromInitContainers(podSpec.InitContainers)
-	for p, q := range profiles {
-		allProfiles[p] += q
-	}
-	totalMemGB += memGB
-
-	// Ephemeral containers
-	profiles, memGB = ExtractMIGProfilesFromEphemeralContainers(podSpec.EphemeralContainers)
-	for p, q := range profiles {
-		allProfiles[p] += q
-	}
-	totalMemGB += memGB
-
-	return allProfiles, totalMemGB
+	return 0
 }
 
 // SerializeMIGProfiles converts a profile map to a deterministic annotation string.
@@ -128,135 +52,150 @@ func SerializeMIGProfiles(profiles map[string]int64) string {
 	return strings.Join(parts, ",")
 }
 
-// HasMIGResources checks if a PodSpec contains any MIG resource requests.
-func HasMIGResources(podSpec *corev1.PodSpec) bool {
-	profiles, _ := ExtractMIGProfilesFromPodSpec(podSpec)
-	return len(profiles) > 0
+// TransformPodTemplateForDAS fully transforms a PodTemplateSpec for DAS scheduling.
+// This is used by source resource webhooks (Job, RayJob, PyTorchJob, etc.) to transform
+// resources BEFORE Kueue creates the Workload.
+//
+// It performs the following transformations:
+// 1. Removes nvidia.com/mig-* resources from containers
+// 2. Adds gpu.das.openshift.io/mem with total GPU memory
+// 3. Sets schedulerName to das-scheduler
+// 4. Sets runtimeClassName to nvidia-legacy
+// 5. Adds das.openshift.io/mig-profiles annotation
+//
+// Returns (totalGPUMemoryGB, migProfiles, modified).
+func TransformPodTemplateForDAS(template *corev1.PodTemplateSpec) (int64, map[string]int64, bool) {
+	allProfiles := make(map[string]int64)
+	totalMemGB := int64(0)
+	modified := false
+
+	// Process regular containers (run concurrently - sum their resources)
+	for i := range template.Spec.Containers {
+		memGB, profiles := transformContainerResourcesForDAS(&template.Spec.Containers[i])
+		if memGB > 0 {
+			modified = true
+			totalMemGB += memGB
+			for p, q := range profiles {
+				allProfiles[p] += q
+			}
+		}
+	}
+
+	// Process init containers (run sequentially - take max)
+	initMaxMemGB := int64(0)
+	for i := range template.Spec.InitContainers {
+		memGB, profiles := transformContainerResourcesForDAS(&template.Spec.InitContainers[i])
+		if memGB > 0 {
+			modified = true
+			if memGB > initMaxMemGB {
+				initMaxMemGB = memGB
+			}
+			for p, q := range profiles {
+				if q > allProfiles[p] {
+					allProfiles[p] = q
+				}
+			}
+		}
+	}
+
+	// Pod's effective GPU memory = max(init_max, regular_sum)
+	if initMaxMemGB > totalMemGB {
+		totalMemGB = initMaxMemGB
+	}
+
+	if !modified {
+		return 0, nil, false
+	}
+
+	// Set DAS scheduler
+	template.Spec.SchedulerName = constants.DASSchedulerName
+
+	// Set nvidia-legacy runtime for MIG workloads
+	runtimeClass := constants.NvidiaLegacyRuntimeClass
+	template.Spec.RuntimeClassName = &runtimeClass
+
+	// Add MIG profiles annotation
+	if template.Annotations == nil {
+		template.Annotations = make(map[string]string)
+	}
+	template.Annotations[constants.MIGProfileAnnotation] = SerializeMIGProfiles(allProfiles)
+
+	klog.InfoS("Transformed pod template for DAS",
+		"totalMemoryGB", totalMemGB,
+		"profiles", allProfiles,
+		"scheduler", template.Spec.SchedulerName)
+
+	return totalMemGB, allProfiles, true
 }
 
-// InjectGPUMemoryResource adds the GPU memory extended resource to container limits/requests.
-func InjectGPUMemoryResource(resources *corev1.ResourceRequirements, totalMemGB int64) {
-	if totalMemGB <= 0 {
-		return
+// transformContainerResourcesForDAS transforms a single container's resources for DAS.
+// Removes nvidia.com/mig-* resources and adds gpu.das.openshift.io/mem.
+// Returns (gpuMemoryGB, profilesMap).
+func transformContainerResourcesForDAS(container *corev1.Container) (int64, map[string]int64) {
+	profiles := make(map[string]int64)
+	memGB := int64(0)
+
+	if container.Resources.Limits == nil {
+		return 0, profiles
 	}
 
-	gpuMemResource := corev1.ResourceName(constants.GPUMemoryResource)
-	gpuMemQuantity := resource.NewQuantity(totalMemGB, resource.DecimalSI)
-
-	if resources.Limits == nil {
-		resources.Limits = corev1.ResourceList{}
-	}
-	if resources.Requests == nil {
-		resources.Requests = corev1.ResourceList{}
-	}
-
-	resources.Limits[gpuMemResource] = *gpuMemQuantity
-	resources.Requests[gpuMemResource] = *gpuMemQuantity
-
-	klog.InfoS("injected GPU memory resource", "resource", constants.GPUMemoryResource, "totalMemoryGB", totalMemGB)
-}
-
-// TransformContainerResources transforms NVIDIA MIG resources to DAS resources in a container.
-// If isKueueManaged is true, MIG resources are removed (profiles go to annotation instead).
-// If isKueueManaged is false, MIG resources are renamed to mig.das.com/*.
-// Returns (totalGPUMemoryGB, needsScheduler).
-func TransformContainerResources(resources *corev1.ResourceRequirements, isKueueManaged bool, migProfiles map[string]int64) (int64, bool) {
-	if resources.Limits == nil {
-		return 0, false
-	}
-
-	totalGPUMemory := int64(0)
-	needsScheduler := false
 	newLimits := corev1.ResourceList{}
 	newRequests := corev1.ResourceList{}
 
-	for name, qty := range resources.Limits {
-		key := string(name)
+	// Process limits - remove MIG resources, keep others
+	for resourceName, qty := range container.Resources.Limits {
+		key := string(resourceName)
 
-		switch {
-		case strings.HasPrefix(key, constants.NVIDIAMIGResourcePrefix):
+		if strings.HasPrefix(key, constants.NVIDIAMIGResourcePrefix) {
 			profile := strings.TrimPrefix(key, constants.NVIDIAMIGResourcePrefix)
-			needsScheduler = true
+			quantity := qty.Value()
+			profiles[profile] = quantity
 
-			if !isKueueManaged {
-				// For non-Kueue pods: rename to mig.das.com/*
-				newKey := corev1.ResourceName(constants.MIGResourcePrefix + profile)
-				klog.V(4).InfoS("renaming GPU resource", "from", key, "to", newKey)
-				newLimits[newKey] = qty
-				newRequests[newKey] = qty
-			} else {
-				// For Kueue pods: store in profiles map (will go to annotation)
-				migProfiles[profile] += qty.Value()
-				klog.V(4).InfoS("storing MIG profile for annotation", "profile", profile, "quantity", qty.Value())
+			profileMemGB := extractGPUMemoryFromProfile(profile)
+			if profileMemGB > 0 {
+				memGB += profileMemGB * quantity
 			}
 
-			// Calculate GPU memory
-			memGB := extractGPUMemoryFromProfile(profile)
-			if memGB > 0 {
-				totalGPUMemory += memGB * qty.Value()
-			}
-
-		case strings.HasPrefix(key, constants.NVIDIAResourcePrefix):
-			// Generic nvidia.com/* resource - rename to mig.das.com/*
-			newKey := corev1.ResourceName(strings.Replace(key, constants.NVIDIAResourcePrefix, constants.MIGResourcePrefix, 1))
-			klog.V(4).InfoS("renaming GPU resource", "from", key, "to", newKey)
-			newLimits[newKey] = qty
-			newRequests[newKey] = qty
-			needsScheduler = true
-
-		case strings.HasPrefix(key, constants.MIGResourcePrefix):
-			// Already a mig.das.com/* resource
-			newLimits[name] = qty
-			needsScheduler = true
-
-			// Extract memory from existing MIG profile
-			profile := strings.TrimPrefix(key, constants.MIGResourcePrefix)
-			memGB := extractGPUMemoryFromProfile(profile)
-			if memGB > 0 {
-				totalGPUMemory += memGB * qty.Value()
-			}
-
-		default:
-			// Non-GPU resource - keep as-is
-			newLimits[name] = qty
+			klog.V(4).InfoS("Removing MIG resource, will use DAS memory resource",
+				"container", container.Name, "resource", key, "profile", profile, "quantity", quantity)
+			// Don't copy nvidia.com/mig-* resource
+		} else {
+			// Keep non-MIG resources
+			newLimits[resourceName] = qty
 		}
 	}
 
-	// Copy non-GPU requests
-	for name, qty := range resources.Requests {
-		key := string(name)
-		if !strings.HasPrefix(key, constants.NVIDIAResourcePrefix) &&
-			!strings.HasPrefix(key, constants.MIGResourcePrefix) &&
-			key != constants.GPUMemoryResource {
-			newRequests[name] = qty
+	// Copy non-MIG requests
+	for resourceName, qty := range container.Resources.Requests {
+		key := string(resourceName)
+		if !strings.HasPrefix(key, constants.NVIDIAMIGResourcePrefix) {
+			newRequests[resourceName] = qty
 		}
 	}
 
-	// Update resources
-	if len(newLimits) > 0 {
-		resources.Limits = newLimits
-	}
-	if len(newRequests) > 0 {
-		resources.Requests = newRequests
+	// Add GPU memory resource if we found MIG profiles
+	if memGB > 0 {
+		gpuMemResource := corev1.ResourceName(constants.GPUMemoryResource)
+		gpuMemQuantity := resource.NewQuantity(memGB, resource.DecimalSI)
+		newLimits[gpuMemResource] = *gpuMemQuantity
+		newRequests[gpuMemResource] = *gpuMemQuantity
+
+		klog.V(4).InfoS("Injected GPU memory into container",
+			"container", container.Name, "memoryGB", memGB)
 	}
 
-	return totalGPUMemory, needsScheduler
+	container.Resources.Limits = newLimits
+	container.Resources.Requests = newRequests
+
+	return memGB, profiles
 }
 
-// MutatePodTemplateForKueue mutates a PodTemplateSpec for Kueue workload admission.
-// It injects GPU memory resources but does NOT transform MIG resources (Kueue needs originals).
-// Returns the MIG profiles found and total GPU memory.
-func MutatePodTemplateForKueue(template *corev1.PodTemplateSpec) (map[string]int64, int64) {
-	profiles, totalMemGB := ExtractMIGProfilesFromPodSpec(&template.Spec)
-
-	if totalMemGB > 0 {
-		// For Kueue workloads, we inject GPU memory into the first container
-		// This is what Kueue will use for quota/admission
-		if len(template.Spec.Containers) > 0 {
-			InjectGPUMemoryResource(&template.Spec.Containers[0].Resources, totalMemGB)
-		}
+// IsKueueManaged checks if a resource has the Kueue queue label.
+func IsKueueManaged(labels map[string]string) bool {
+	if labels == nil {
+		return false
 	}
-
-	return profiles, totalMemGB
+	_, exists := labels[constants.KueueQueueLabel]
+	return exists
 }
 

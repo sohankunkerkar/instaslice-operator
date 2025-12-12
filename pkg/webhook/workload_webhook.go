@@ -20,31 +20,21 @@ const (
 	WorkloadWebhookName string = "das-workload-webhook"
 )
 
-// WorkloadWebhook interface for Kueue Workload mutation
-type WorkloadWebhook interface {
-	// Authorized processes the admission request for Workload resources
-	Authorized(request admissionctl.Request) admissionctl.Response
-	// GetURI returns the URI for the webhook
-	GetURI() string
-	// Name is the name of the webhook
-	Name() string
-}
-
 // InstasliceWorkloadWebhook handles mutation of Kueue Workload resources
 type InstasliceWorkloadWebhook struct{}
 
 // NewWorkloadWebhook creates a new WorkloadWebhook instance
-func NewWorkloadWebhook() WorkloadWebhook {
+func NewWorkloadWebhook() *InstasliceWorkloadWebhook {
 	return &InstasliceWorkloadWebhook{}
 }
 
-// GetURI implements WorkloadWebhook interface
+// GetURI implements GenericWebhook interface
 func (w *InstasliceWorkloadWebhook) GetURI() string { return WorkloadURI }
 
-// Name implements WorkloadWebhook interface
+// Name implements GenericWebhook interface
 func (w *InstasliceWorkloadWebhook) Name() string { return WorkloadWebhookName }
 
-// Authorized implements WorkloadWebhook interface
+// Authorized implements GenericWebhook interface
 func (w *InstasliceWorkloadWebhook) Authorized(request admissionctl.Request) admissionctl.Response {
 	var ret admissionctl.Response
 
@@ -156,6 +146,10 @@ func (w *InstasliceWorkloadWebhook) mutateWorkload(workload *kueuev1beta1.Worklo
 			klog.V(4).InfoS("Injected GPU memory into first container",
 				"podSet", podSet.Name, "container", container.Name, "memoryGB", podSetMemGB)
 		}
+
+		// NOTE: Original nvidia.com/mig-* resources are NOT removed here.
+		// For Kueue-managed Jobs, the Job webhook transforms resources before the Workload is created.
+		// For standalone Workloads, we add gpu.das.openshift.io/mem alongside existing resources.
 
 		// Accumulate profiles (considering podSet count)
 		for profile, qty := range podSetProfiles {
@@ -273,19 +267,14 @@ func (w *InstasliceWorkloadWebhook) renderWorkload(request admissionctl.Request)
 	klog.V(4).InfoS("Rendering Workload from request", "uid", request.UID)
 
 	workload := &kueuev1beta1.Workload{}
-	var data []byte
-	if len(request.OldObject.Raw) > 0 {
-		data = request.OldObject.Raw
-	} else {
-		data = request.Object.Raw
-	}
-
-	if err := json.Unmarshal(data, workload); err != nil {
+	// Always use Object.Raw (the new/current state) for both CREATE and UPDATE operations.
+	// Using OldObject.Raw on UPDATE would cause us to lose changes made by Kueue.
+	if err := json.Unmarshal(request.Object.Raw, workload); err != nil {
 		return nil, err
 	}
 
 	return workload, nil
 }
 
-// Ensure InstasliceWorkloadWebhook implements WorkloadWebhook
-var _ WorkloadWebhook = (*InstasliceWorkloadWebhook)(nil)
+// Ensure InstasliceWorkloadWebhook implements GenericWebhook
+var _ GenericWebhook = (*InstasliceWorkloadWebhook)(nil)

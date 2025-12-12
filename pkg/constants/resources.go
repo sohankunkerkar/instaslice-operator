@@ -16,6 +16,15 @@ const (
 
 	// MIGProfileAnnotation is the annotation key for storing MIG profiles for Kueue-managed Pods
 	MIGProfileAnnotation = "das.openshift.io/mig-profiles"
+
+	// DASSchedulerName is the name of the DAS scheduler
+	DASSchedulerName = "das-scheduler"
+
+	// NvidiaLegacyRuntimeClass is the runtime class for MIG workloads
+	NvidiaLegacyRuntimeClass = "nvidia-legacy"
+
+	// KueueQueueLabel is the label Kueue uses to identify managed workloads
+	KueueQueueLabel = "kueue.x-k8s.io/queue-name"
 )
 
 // Device plugin constants
